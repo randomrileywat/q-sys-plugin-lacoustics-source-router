@@ -98,6 +98,12 @@ function GetControls(props)
   end
   table.insert(ctrls, { Name = "ColorNone", ControlType = "Text" })
 
+  -- Source labels (editable, propagate to output buttons)
+  for s = 1, 16 do
+    table.insert(ctrls, { Name = "SourceLabel_" .. s, ControlType = "Text", UserPin = true, PinStyle = "Both" })
+  end
+  table.insert(ctrls, { Name = "ShowOutputLabels", ControlType = "Button", ButtonType = "Toggle" })
+
   -- Per amplifier controls
   for a = 1, ampCount do
     table.insert(ctrls, { Name = "AmpName_" .. a,   ControlType = "Text", UserPin = true, PinStyle = "Input" })
@@ -171,7 +177,7 @@ function GetControlLayout(props)
       Text = "SOURCE:", HTextAlign = "Right", FontSize = 11
     })
 
-    -- Source selection buttons row 1 (1-8)
+    -- Source selection buttons row 1 (1-8) with label fields
     for s = 1, 8 do
       local x = 78 + (s - 1) * srcSpacing
       layout["SourceSelect_" .. s] = {
@@ -180,11 +186,19 @@ function GetControlLayout(props)
         Position = {x, y},
         Size = {srcBtnW, srcBtnH}
       }
+      layout["SourceLabel_" .. s] = {
+        PrettyName = "Source " .. s .. " Label",
+        Style = "Text",
+        Position = {x, y + srcBtnH},
+        Size = {srcBtnW, 14},
+        Padding = 0,
+        FontSize = 8
+      }
     end
 
-    y = y + srcBtnH + 4
+    y = y + srcBtnH + 14 + 4
 
-    -- Source selection buttons row 2 (9-16)
+    -- Source selection buttons row 2 (9-16) with label fields
     for s = 9, 16 do
       local x = 78 + (s - 9) * srcSpacing
       layout["SourceSelect_" .. s] = {
@@ -192,6 +206,14 @@ function GetControlLayout(props)
         Style = "Button",
         Position = {x, y},
         Size = {srcBtnW, srcBtnH}
+      }
+      layout["SourceLabel_" .. s] = {
+        PrettyName = "Source " .. s .. " Label",
+        Style = "Text",
+        Position = {x, y + srcBtnH},
+        Size = {srcBtnW, 14},
+        Padding = 0,
+        FontSize = 8
       }
     end
 
@@ -207,11 +229,12 @@ function GetControlLayout(props)
       Position = {0, 0}, Size = {0, 0}
     }
 
-    -- Hide color config controls on router pages
+    -- Hide color config and settings-only controls on router pages
     for s = 1, 16 do
       layout["SourceColor_" .. s] = { PrettyName = "Source " .. s .. " Color", Style = "Text", Position = {0,0}, Size = {0,0} }
     end
     layout["ColorNone"] = { PrettyName = "No Source Color", Style = "Text", Position = {0,0}, Size = {0,0} }
+    layout["ShowOutputLabels"] = { PrettyName = "Show Output Labels", Style = "Button", Position = {0,0}, Size = {0,0} }
 
     y = y + srcBtnH + 8
 
@@ -394,15 +417,31 @@ function GetControlLayout(props)
     end
 
     settingsY = settingsY + 8 * 24 + 8
+
+    -- ---- Output Label Toggle ----
+    table.insert(graphics, {
+      Type = "Label", Position = {10, settingsY + 2}, Size = {140, 18},
+      Text = "Show Labels on Outputs:", HTextAlign = "Right", FontSize = 10
+    })
+    layout["ShowOutputLabels"] = {
+      PrettyName = "Show Output Labels",
+      Style = "Button",
+      Legend = "",
+      Position = {155, settingsY + 1},
+      Size = {16, 16}
+    }
+
+    settingsY = settingsY + 24
     table.insert(graphics, {
       Type = "Label", Position = {10, settingsY}, Size = {250, 16},
       Text = "Plugin Version: " .. (PluginInfo.Version or "Unknown"),
       HTextAlign = "Left", FontSize = 9
     })
 
-    -- Hide source buttons on Settings page
+    -- Hide source buttons and labels on Settings page
     for s = 1, 16 do
       layout["SourceSelect_" .. s] = { Style = "Button", Position = {0,0}, Size = {0,0} }
+      layout["SourceLabel_" .. s] = { PrettyName = "Source " .. s .. " Label", Style = "Text", Position = {0,0}, Size = {0,0} }
     end
     layout["SelectedSource"] = { PrettyName = "Selected Source", Style = "Text", Position = {0,0}, Size = {0,0} }
 
@@ -531,7 +570,20 @@ end
 local OPACITY_FULL = 0xFF    -- 100% for source buttons & highlighted outputs
 local OPACITY_DIM  = 0xBF    -- 75% for non-highlighted output buttons
 
--- Update the source selection button UI (always full opacity)
+-- Get the label for a source, or fall back to its number
+local function GetSourceLabel(src)
+  if src <= 0 then return "--" end
+  local ctrl = Controls["SourceLabel_" .. src]
+  if ctrl and ctrl.String and ctrl.String:match("%S") then return ctrl.String end
+  return tostring(src)
+end
+
+-- Whether output buttons should show labels
+local function ShowOutputLabels()
+  return Controls.ShowOutputLabels and Controls.ShowOutputLabels.Boolean
+end
+
+-- Update the source selection button UI (always full opacity, always show label)
 local function UpdateSourceUI()
   Controls.SelectedSource.Value = selectedSource
   for s = 1, 16 do
@@ -539,10 +591,18 @@ local function UpdateSourceUI()
     local baseColor = isSelected and GetSourceColorSelected(s) or GetSourceColor(s)
     Controls["SourceSelect_" .. s].Boolean = isSelected
     Controls["SourceSelect_" .. s].Color = ApplyOpacity(baseColor, OPACITY_FULL)
+    Controls["SourceSelect_" .. s].Legend = GetSourceLabel(s)
   end
 end
 
--- Refresh all output button colors (called when source colors or selected source changes)
+-- Get the legend text for an output button based on its source and label toggle
+local function GetOutputLegend(src)
+  if src <= 0 then return "--" end
+  if ShowOutputLabels() then return GetSourceLabel(src) end
+  return tostring(src)
+end
+
+-- Refresh all output button colors and legends
 local function RefreshAllOutputColors()
   for a = 1, ampCount do
     if outputState[a] then
@@ -550,7 +610,7 @@ local function RefreshAllOutputColors()
         local src = outputState[a][o] or 0
         local btn = Controls["OutputBtn_" .. a .. "_" .. o]
         if btn then
-          btn.Legend = src > 0 and tostring(src) or "--"
+          btn.Legend = GetOutputLegend(src)
           local opacity = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
           btn.Color = ApplyOpacity(GetSourceColor(src), opacity)
         end
@@ -575,7 +635,7 @@ local function UpdateOutputDisplay(a, o)
   local srcCtrl = Controls["OutputSrc_" .. a .. "_" .. o]
 
   if btn then
-    btn.Legend = src > 0 and tostring(src) or "--"
+    btn.Legend = GetOutputLegend(src)
     local opacity = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
     btn.Color = ApplyOpacity(GetSourceColor(src), opacity)
   end
@@ -739,6 +799,21 @@ for s = 1, 16 do
 end
 if Controls.ColorNone then
   Controls.ColorNone.EventHandler = function()
+    RefreshAllOutputColors()
+  end
+end
+
+-- Source label change handlers: update source button legend + output legends
+for s = 1, 16 do
+  Controls["SourceLabel_" .. s].EventHandler = function()
+    Controls["SourceSelect_" .. s].Legend = GetSourceLabel(s)
+    RefreshAllOutputColors()  -- Update any output buttons showing this source
+  end
+end
+
+-- Show/hide output labels toggle
+if Controls.ShowOutputLabels then
+  Controls.ShowOutputLabels.EventHandler = function()
     RefreshAllOutputColors()
   end
 end
