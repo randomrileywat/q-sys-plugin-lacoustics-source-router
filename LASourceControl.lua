@@ -41,19 +41,15 @@ PluginInfo = {
 local function getPageList(props)
   local pages = {}
   local ampCount = (props["Amp Count"] and props["Amp Count"].Value) or 1
-  if ampCount <= 4 then
-    if ampCount == 1 then
-      table.insert(pages, "Amp 1")
+  local pageStart = 1
+  while pageStart <= ampCount do
+    local pageEnd = math.min(pageStart + 3, ampCount)
+    if pageStart == pageEnd then
+      table.insert(pages, "Amp " .. pageStart)
     else
-      table.insert(pages, "Amps 1-" .. ampCount)
+      table.insert(pages, "Amps " .. pageStart .. "-" .. pageEnd)
     end
-  else
-    table.insert(pages, "Amps 1-4")
-    if ampCount == 5 then
-      table.insert(pages, "Amp 5")
-    else
-      table.insert(pages, "Amps 5-" .. ampCount)
-    end
+    pageStart = pageEnd + 1
   end
   table.insert(pages, "Settings")
   return pages
@@ -72,7 +68,7 @@ end
 ---------------------------------------------------------------
 function GetProperties()
   return {
-    { Name = "Amp Count", Type = "integer", Min = 1, Max = 8, Value = 1 }
+    { Name = "Amp Count", Type = "integer", Min = 1, Max = 12, Value = 1 }
   }
 end
 
@@ -139,7 +135,7 @@ function GetControlLayout(props)
   local current_page = pages[page_index] or pages[#pages]
 
   local layout, graphics = {}, {}
-  local ampCount = math.max(1, math.min(8, props["Amp Count"].Value or 1))
+  local ampCount = math.max(1, math.min(12, props["Amp Count"].Value or 1))
 
   -- Sizing constants
   local srcBtnW, srcBtnH = 55, 28
