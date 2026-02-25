@@ -236,7 +236,7 @@ function GetControlLayout(props)
     layout["ColorNone"] = { PrettyName = "No Source Color", Style = "Text", Position = {0,0}, Size = {0,0} }
     layout["ShowOutputLabels"] = { PrettyName = "Show Output Labels", Style = "Button", Position = {0,0}, Size = {0,0} }
 
-    y = y + srcBtnH + 8
+    y = y + srcBtnH + 14 + 8
 
     -- Column headers for outputs 1-16
     for o = 1, 16 do
