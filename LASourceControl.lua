@@ -440,44 +440,72 @@ local function dbg(msg) if DEBUG then print(msg) end end
 
 local ampCount = Properties["Amp Count"].Value
 
--- Default source color palette (used when user hasn't configured a color)
+-- Default source color palette (base RGB only, no opacity)
 local DefaultSourceColors = {
-  [0]  = "#80404040",  -- None (dark gray)
-  [1]  = "#80CC0000",  -- Red
-  [2]  = "#8000AA00",  -- Green
-  [3]  = "#800055DD",  -- Blue
-  [4]  = "#80CCAA00",  -- Yellow
-  [5]  = "#80DD6600",  -- Orange
-  [6]  = "#809900CC",  -- Purple
-  [7]  = "#8000AAAA",  -- Cyan
-  [8]  = "#80CC44AA",  -- Pink
-  [9]  = "#80886600",  -- Brown
-  [10] = "#8000CC66",  -- Mint
-  [11] = "#803366CC",  -- Steel Blue
-  [12] = "#80CC3366",  -- Rose
-  [13] = "#8066CC00",  -- Lime
-  [14] = "#806600CC",  -- Indigo
-  [15] = "#80009999",  -- Teal
-  [16] = "#80CC6699",  -- Mauve
+  [0]  = "#404040",  -- None (dark gray)
+  [1]  = "#CC0000",  -- Red
+  [2]  = "#00AA00",  -- Green
+  [3]  = "#0055DD",  -- Blue
+  [4]  = "#CCAA00",  -- Yellow
+  [5]  = "#DD6600",  -- Orange
+  [6]  = "#9900CC",  -- Purple
+  [7]  = "#00AAAA",  -- Cyan
+  [8]  = "#CC44AA",  -- Pink
+  [9]  = "#886600",  -- Brown
+  [10] = "#00CC66",  -- Mint
+  [11] = "#3366CC",  -- Steel Blue
+  [12] = "#CC3366",  -- Rose
+  [13] = "#66CC00",  -- Lime
+  [14] = "#6600CC",  -- Indigo
+  [15] = "#009999",  -- Teal
+  [16] = "#CC6699",  -- Mauve
 }
 
--- Get the effective color for a source (user-configured or default)
+-- Strip any existing opacity prefix and return pure #RRGGBB
+local function NormalizeColor(hex)
+  if not hex or hex == "" then return nil end
+  hex = hex:match("^%s*(.-)%s*$") -- trim
+  if hex:sub(1,1) == "#" then
+    local body = hex:sub(2)
+    if #body == 8 then
+      -- #AARRGGBB -> #RRGGBB (strip the 2-char opacity prefix)
+      return "#" .. body:sub(3)
+    elseif #body == 6 then
+      return hex
+    end
+  end
+  return hex
+end
+
+-- Apply an opacity prefix (0-255) to a #RRGGBB color -> #AARRGGBB
+local function ApplyOpacity(color, alpha)
+  color = NormalizeColor(color) or "#404040"
+  if color:sub(1,1) == "#" and #color == 7 then
+    return string.format("#%02X%s", alpha, color:sub(2))
+  end
+  return color
+end
+
+-- Get the base color for a source (user-configured or default), no opacity
 local function GetSourceColor(src)
   if src == 0 then
     local ctrl = Controls.ColorNone
-    if ctrl and ctrl.String and ctrl.String:match("%S") then return ctrl.String end
+    if ctrl and ctrl.String and ctrl.String:match("%S") then
+      return NormalizeColor(ctrl.String) or DefaultSourceColors[0]
+    end
     return DefaultSourceColors[0]
   end
   local ctrl = Controls["SourceColor_" .. src]
-  if ctrl and ctrl.String and ctrl.String:match("%S") then return ctrl.String end
+  if ctrl and ctrl.String and ctrl.String:match("%S") then
+    return NormalizeColor(ctrl.String) or DefaultSourceColors[src] or "#404040"
+  end
   return DefaultSourceColors[src] or "#404040"
 end
 
--- Get brightened version of a source color for selected state
+-- Get brightened version of a source color for the selected source button
 local function GetSourceColorSelected(src)
   local base = GetSourceColor(src)
-  -- Simple brighten: if hex, lighten; otherwise return as-is
-  if base:sub(1,1) == "#" and #base >= 7 then
+  if base:sub(1,1) == "#" and #base == 7 then
     local r = tonumber(base:sub(2,3), 16) or 128
     local g = tonumber(base:sub(4,5), 16) or 128
     local b = tonumber(base:sub(6,7), 16) or 128
@@ -503,17 +531,22 @@ local function PatchIndex(output, input)
   return (output - 1) * 16 + input
 end
 
--- Update the source selection button UI
+-- Opacity constants
+local OPACITY_FULL = 0xFF    -- 100% for source buttons & highlighted outputs
+local OPACITY_DIM  = 0xBF    -- 75% for non-highlighted output buttons
+
+-- Update the source selection button UI (always full opacity)
 local function UpdateSourceUI()
   Controls.SelectedSource.Value = selectedSource
   for s = 1, 16 do
     local isSelected = (s == selectedSource)
+    local baseColor = isSelected and GetSourceColorSelected(s) or GetSourceColor(s)
     Controls["SourceSelect_" .. s].Boolean = isSelected
-    Controls["SourceSelect_" .. s].Color = isSelected and GetSourceColorSelected(s) or GetSourceColor(s)
+    Controls["SourceSelect_" .. s].Color = ApplyOpacity(baseColor, OPACITY_FULL)
   end
 end
 
--- Refresh all output button colors (called when source colors change)
+-- Refresh all output button colors (called when source colors or selected source changes)
 local function RefreshAllOutputColors()
   for a = 1, ampCount do
     if outputState[a] then
@@ -522,7 +555,8 @@ local function RefreshAllOutputColors()
         local btn = Controls["OutputBtn_" .. a .. "_" .. o]
         if btn then
           btn.Legend = src > 0 and tostring(src) or "--"
-          btn.Color = GetSourceColor(src)
+          local opacity = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
+          btn.Color = ApplyOpacity(GetSourceColor(src), opacity)
         end
       end
     end
@@ -534,10 +568,11 @@ local function SetSelectedSource(src)
   src = math.max(0, math.min(16, src or 0))
   selectedSource = src
   UpdateSourceUI()
+  RefreshAllOutputColors()
   dbg("[SOURCE] Selected: " .. (src > 0 and tostring(src) or "None"))
 end
 
--- Update one output button's display (legend + color)
+-- Update one output button's display (legend + color with opacity)
 local function UpdateOutputDisplay(a, o)
   local src = (outputState[a] and outputState[a][o]) or 0
   local btn = Controls["OutputBtn_" .. a .. "_" .. o]
@@ -545,7 +580,8 @@ local function UpdateOutputDisplay(a, o)
 
   if btn then
     btn.Legend = src > 0 and tostring(src) or "--"
-    btn.Color = GetSourceColor(src)
+    local opacity = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
+    btn.Color = ApplyOpacity(GetSourceColor(src), opacity)
   end
   if srcCtrl then
     srcCtrl.Value = src
