@@ -4,6 +4,18 @@
 -- rwatson@onediversified.com
 --
 -- Current Version:
+-- v260301.1 (RWatson)
+--  - Configurable source/output label modes (Numbers, Labels, None).
+--  - Source label mode ComboBox on Settings page.
+--  - All amps displayed on a single router page (up to 12).
+--  - Editable source labels propagate to output buttons.
+--  - Opacity system: 100% source buttons, 75% output buttons,
+--    100% when output matches selected source.
+--  - Configurable per-source colors on Settings page.
+--  - "Assign All" button reflects majority source color.
+--  - No action when no source is selected.
+--
+-- Change Log:
 -- v260224.1 (RWatson)
 --  - Initial release.
 --
@@ -27,8 +39,8 @@
 -- Plugin Info
 ---------------------------------------------------------------
 PluginInfo = {
-  Name = "L'Acoustics LA7.16~Source Router",
-  Version = "260224.1",
+  Name = "L-Acoustics~Source Router",
+  Version = "260301.1",
   Id = "b8a3e7c1-4f52-4d8a-a1e9-3c7b5d9f2e01",
   Author = "Riley Watson",
   Description = "Source router for L'Acoustics LA7.16 amplifier input/output matrix. Select a source (1-16) and paint to outputs across multiple amps.",
@@ -41,15 +53,10 @@ PluginInfo = {
 local function getPageList(props)
   local pages = {}
   local ampCount = (props["Amp Count"] and props["Amp Count"].Value) or 1
-  local pageStart = 1
-  while pageStart <= ampCount do
-    local pageEnd = math.min(pageStart + 3, ampCount)
-    if pageStart == pageEnd then
-      table.insert(pages, "Amp " .. pageStart)
-    else
-      table.insert(pages, "Amps " .. pageStart .. "-" .. pageEnd)
-    end
-    pageStart = pageEnd + 1
+  if ampCount == 1 then
+    table.insert(pages, "Amp 1")
+  else
+    table.insert(pages, "Amps 1-" .. ampCount)
   end
   table.insert(pages, "Settings")
   return pages
@@ -102,7 +109,18 @@ function GetControls(props)
   for s = 1, 16 do
     table.insert(ctrls, { Name = "SourceLabel_" .. s, ControlType = "Text", UserPin = true, PinStyle = "Both" })
   end
-  table.insert(ctrls, { Name = "ShowOutputLabels", ControlType = "Button", ButtonType = "Toggle" })
+  table.insert(ctrls, {
+    Name = "ShowOutputLabels",
+    ControlType = "Text",
+    Count = 1,
+    Choices = {"Numbers", "Labels", "None"}
+  })
+  table.insert(ctrls, {
+    Name = "ShowSourceLabels",
+    ControlType = "Text",
+    Count = 1,
+    Choices = {"Numbers", "Labels", "None"}
+  })
 
   -- Per amplifier controls
   for a = 1, ampCount do
@@ -164,7 +182,7 @@ function GetControlLayout(props)
       if lo > hi then lo, hi = hi, lo end
       return math.max(1, lo), math.min(hi, maxA)
     end
-    return 1, math.min(4, maxA)
+    return 1, math.min(12, maxA)
   end
 
   -- Draw a router page for amp range [a_lo, a_hi]
@@ -234,7 +252,8 @@ function GetControlLayout(props)
       layout["SourceColor_" .. s] = { PrettyName = "Source " .. s .. " Color", Style = "Text", Position = {0,0}, Size = {0,0} }
     end
     layout["ColorNone"] = { PrettyName = "No Source Color", Style = "Text", Position = {0,0}, Size = {0,0} }
-    layout["ShowOutputLabels"] = { PrettyName = "Show Output Labels", Style = "Button", Position = {0,0}, Size = {0,0} }
+    layout["ShowOutputLabels"] = { PrettyName = "Output Label Mode", Style = "Text", Position = {0,0}, Size = {0,0} }
+    layout["ShowSourceLabels"] = { PrettyName = "Source Label Mode", Style = "Text", Position = {0,0}, Size = {0,0} }
 
     y = y + srcBtnH + 14 + 8
 
@@ -418,17 +437,30 @@ function GetControlLayout(props)
 
     settingsY = settingsY + 8 * 24 + 8
 
-    -- ---- Output Label Toggle ----
+    -- ---- Output Label Mode ----
     table.insert(graphics, {
       Type = "Label", Position = {10, settingsY + 2}, Size = {140, 18},
-      Text = "Show Labels on Outputs:", HTextAlign = "Right", FontSize = 10
+      Text = "Output Label Mode:", HTextAlign = "Right", FontSize = 10
     })
     layout["ShowOutputLabels"] = {
-      PrettyName = "Show Output Labels",
-      Style = "Button",
-      Legend = "",
-      Position = {155, settingsY + 1},
-      Size = {16, 16}
+      PrettyName = "Output Label Mode",
+      Style = "ComboBox",
+      Position = {155, settingsY},
+      Size = {100, 20}
+    }
+
+    settingsY = settingsY + 24
+
+    -- ---- Source Label Mode ----
+    table.insert(graphics, {
+      Type = "Label", Position = {10, settingsY + 2}, Size = {140, 18},
+      Text = "Source Label Mode:", HTextAlign = "Right", FontSize = 10
+    })
+    layout["ShowSourceLabels"] = {
+      PrettyName = "Source Label Mode",
+      Style = "ComboBox",
+      Position = {155, settingsY},
+      Size = {100, 20}
     }
 
     settingsY = settingsY + 24
@@ -578,12 +610,40 @@ local function GetSourceLabel(src)
   return tostring(src)
 end
 
--- Whether output buttons should show labels
-local function ShowOutputLabels()
-  return Controls.ShowOutputLabels and Controls.ShowOutputLabels.Boolean
+-- Read a label mode ComboBox. Returns "Numbers", "Labels", or "None".
+local function ReadLabelMode(ctrl)
+  if not ctrl then return "Numbers" end
+  local raw = ctrl.String or ""
+  -- Match case-insensitively
+  local lower = raw:lower():gsub("^%s*(.-)%s*$", "%1")
+  if lower == "none"   then return "None"    end
+  if lower == "labels" then return "Labels"  end
+  if lower == "numbers" then return "Numbers" end
+  -- If String didn't match, try Value as 0-based index
+  local idx = math.floor((ctrl.Value or 0) + 0.5)
+  if idx == 2 then return "None"    end
+  if idx == 1 then return "Labels"  end
+  return "Numbers"
 end
 
--- Update the source selection button UI (always full opacity, always show label)
+local function GetOutputLabelMode()
+  return ReadLabelMode(Controls.ShowOutputLabels)
+end
+
+local function GetSourceLabelMode()
+  return ReadLabelMode(Controls.ShowSourceLabels)
+end
+
+-- Get the legend for a source button
+local function GetSourceButtonLegend(src)
+  local mode = GetSourceLabelMode()
+  if mode == "None" then return " " end
+  if src <= 0 then return " " end
+  if mode == "Labels" then return GetSourceLabel(src) end
+  return tostring(src)
+end
+
+-- Update the source selection button UI (always full opacity)
 local function UpdateSourceUI()
   Controls.SelectedSource.Value = selectedSource
   for s = 1, 16 do
@@ -591,18 +651,46 @@ local function UpdateSourceUI()
     local baseColor = isSelected and GetSourceColorSelected(s) or GetSourceColor(s)
     Controls["SourceSelect_" .. s].Boolean = isSelected
     Controls["SourceSelect_" .. s].Color = ApplyOpacity(baseColor, OPACITY_FULL)
-    Controls["SourceSelect_" .. s].Legend = GetSourceLabel(s)
+    Controls["SourceSelect_" .. s].Legend = GetSourceButtonLegend(s)
   end
 end
 
--- Get the legend text for an output button based on its source and label toggle
+-- Get the legend text for an output button
 local function GetOutputLegend(src)
-  if src <= 0 then return "--" end
-  if ShowOutputLabels() then return GetSourceLabel(src) end
+  local mode = GetOutputLabelMode()
+  if mode == "None" then return " " end
+  if src <= 0 then return " " end
+  if mode == "Labels" then return GetSourceLabel(src) end
   return tostring(src)
 end
 
--- Refresh all output button colors and legends
+-- Compute the majority source color for an amp's "All" button
+local function UpdateAssignAllColor(a)
+  local btn = Controls["AssignAll_" .. a]
+  if not btn then return end
+  if not outputState[a] then
+    btn.Color = ApplyOpacity(GetSourceColor(0), OPACITY_DIM)
+    return
+  end
+  -- Count occurrences of each source
+  local counts = {}
+  for o = 1, 16 do
+    local src = outputState[a][o] or 0
+    counts[src] = (counts[src] or 0) + 1
+  end
+  -- Find majority
+  local maxSrc, maxCount = 0, 0
+  for src, cnt in pairs(counts) do
+    if cnt > maxCount then
+      maxSrc = src
+      maxCount = cnt
+    end
+  end
+  local opacity = (maxSrc > 0 and maxSrc == selectedSource) and OPACITY_FULL or OPACITY_DIM
+  btn.Color = ApplyOpacity(GetSourceColor(maxSrc), opacity)
+end
+
+-- Refresh all output button colors, legends, and All button colors
 local function RefreshAllOutputColors()
   for a = 1, ampCount do
     if outputState[a] then
@@ -616,6 +704,7 @@ local function RefreshAllOutputColors()
         end
       end
     end
+    UpdateAssignAllColor(a)
   end
 end
 
@@ -642,6 +731,7 @@ local function UpdateOutputDisplay(a, o)
   if srcCtrl then
     srcCtrl.Value = src
   end
+  UpdateAssignAllColor(a)
 end
 
 -- Update amp status indicator
@@ -806,15 +896,32 @@ end
 -- Source label change handlers: update source button legend + output legends
 for s = 1, 16 do
   Controls["SourceLabel_" .. s].EventHandler = function()
-    Controls["SourceSelect_" .. s].Legend = GetSourceLabel(s)
-    RefreshAllOutputColors()  -- Update any output buttons showing this source
+    UpdateSourceUI()
+    RefreshAllOutputColors()
   end
 end
 
--- Show/hide output labels toggle
+-- Show/hide output labels mode change
 if Controls.ShowOutputLabels then
-  Controls.ShowOutputLabels.EventHandler = function()
+  Controls.ShowOutputLabels.Choices = {"Numbers", "Labels", "None"}
+  Controls.ShowOutputLabels.EventHandler = function(ctrl)
     RefreshAllOutputColors()
+  end
+  -- Initialize to "Numbers" if empty
+  if not Controls.ShowOutputLabels.String or not Controls.ShowOutputLabels.String:match("%S") then
+    Controls.ShowOutputLabels.String = "Numbers"
+  end
+end
+
+-- Show/hide source labels mode change
+if Controls.ShowSourceLabels then
+  Controls.ShowSourceLabels.Choices = {"Numbers", "Labels", "None"}
+  Controls.ShowSourceLabels.EventHandler = function(ctrl)
+    UpdateSourceUI()
+  end
+  -- Initialize to "Numbers" if empty
+  if not Controls.ShowSourceLabels.String or not Controls.ShowSourceLabels.String:match("%S") then
+    Controls.ShowSourceLabels.String = "Numbers"
   end
 end
 
@@ -834,6 +941,10 @@ for a = 1, ampCount do
 
   -- "Assign All" button -> assign selected source to all 16 outputs
   Controls["AssignAll_" .. a].EventHandler = function()
+    if selectedSource == 0 then
+      dbg("[AMP " .. a .. "] No source selected, ignoring Assign All")
+      return
+    end
     if not amps[a] or not amps[a].comp then
       dbg("[AMP " .. a .. "] Not connected, cannot assign all")
       return
@@ -853,6 +964,10 @@ for a = 1, ampCount do
 
     -- Output button: paint selected source
     Controls["OutputBtn_" .. a .. "_" .. o].EventHandler = function()
+      if selectedSource == 0 then
+        dbg("[AMP " .. a .. "] No source selected, ignoring output " .. o)
+        return
+      end
       if not amps[a] or not amps[a].comp then
         dbg("[AMP " .. a .. "] Not connected, cannot set output " .. o)
         return
