@@ -109,6 +109,11 @@ function GetControls(props)
   for s = 1, 16 do
     table.insert(ctrls, { Name = "SourceLabel_" .. s, ControlType = "Text", UserPin = true, PinStyle = "Both" })
   end
+
+  -- Source input mapping (comma-separated physical inputs, e.g. "1,3")
+  for s = 1, 16 do
+    table.insert(ctrls, { Name = "SourceInputs_" .. s, ControlType = "Text", UserPin = true, PinStyle = "Both" })
+  end
   table.insert(ctrls, {
     Name = "ShowOutputLabels",
     ControlType = "Text",
@@ -250,6 +255,7 @@ function GetControlLayout(props)
     -- Hide color config and settings-only controls on router pages
     for s = 1, 16 do
       layout["SourceColor_" .. s] = { PrettyName = "Source " .. s .. " Color", Style = "Text", Position = {0,0}, Size = {0,0} }
+      layout["SourceInputs_" .. s] = { PrettyName = "Source " .. s .. " Inputs", Style = "Text", Position = {0,0}, Size = {0,0} }
     end
     layout["ColorNone"] = { PrettyName = "No Source Color", Style = "Text", Position = {0,0}, Size = {0,0} }
     layout["ShowOutputLabels"] = { PrettyName = "Output Label Mode", Style = "Text", Position = {0,0}, Size = {0,0} }
@@ -384,7 +390,7 @@ function GetControlLayout(props)
     -- ---- Source Colors ----
     table.insert(graphics, {
       Type = "Label", Position = {10, settingsY}, Size = {250, 20},
-      Text = "Source Colors (hex, e.g. #CC0000)", HTextAlign = "Left", FontSize = 12
+      Text = "Source Colors (hex, e.g. #E05A3A)", HTextAlign = "Left", FontSize = 12
     })
     settingsY = settingsY + 22
 
@@ -437,6 +443,47 @@ function GetControlLayout(props)
 
     settingsY = settingsY + 8 * 24 + 8
 
+    -- ---- Source Input Mapping ----
+    table.insert(graphics, {
+      Type = "Label", Position = {10, settingsY}, Size = {350, 20},
+      Text = "Source Input Mapping (comma-separated, e.g. 1,3)", HTextAlign = "Left", FontSize = 12
+    })
+    settingsY = settingsY + 22
+
+    for row = 0, 7 do
+      local s1 = row + 1
+      local s2 = row + 9
+      local y = settingsY + row * 24
+
+      -- Left column: source 1-8
+      table.insert(graphics, {
+        Type = "Label", Position = {10, y + 2}, Size = {70, 18},
+        Text = "Source " .. s1 .. ":", HTextAlign = "Right", FontSize = 10
+      })
+      layout["SourceInputs_" .. s1] = {
+        PrettyName = "Source " .. s1 .. " Inputs",
+        Style = "Text",
+        Position = {85, y},
+        Size = {110, 20},
+        Padding = 2
+      }
+
+      -- Right column: source 9-16
+      table.insert(graphics, {
+        Type = "Label", Position = {210, y + 2}, Size = {70, 18},
+        Text = "Source " .. s2 .. ":", HTextAlign = "Right", FontSize = 10
+      })
+      layout["SourceInputs_" .. s2] = {
+        PrettyName = "Source " .. s2 .. " Inputs",
+        Style = "Text",
+        Position = {285, y},
+        Size = {110, 20},
+        Padding = 2
+      }
+    end
+
+    settingsY = settingsY + 8 * 24 + 8
+
     -- ---- Output Label Mode ----
     table.insert(graphics, {
       Type = "Label", Position = {10, settingsY + 2}, Size = {140, 18},
@@ -474,6 +521,7 @@ function GetControlLayout(props)
     for s = 1, 16 do
       layout["SourceSelect_" .. s] = { Style = "Button", Position = {0,0}, Size = {0,0} }
       layout["SourceLabel_" .. s] = { PrettyName = "Source " .. s .. " Label", Style = "Text", Position = {0,0}, Size = {0,0} }
+      -- SourceInputs already laid out above on Settings page
     end
     layout["SelectedSource"] = { PrettyName = "Selected Source", Style = "Text", Position = {0,0}, Size = {0,0} }
 
@@ -510,14 +558,14 @@ local ampCount = Properties["Amp Count"].Value
 -- Default source color palette (base RGB only, no opacity)
 local DefaultSourceColors = {
   [0]  = "#404040",  -- None (dark gray)
-  [1]  = "#CC0000",  -- Red
-  [2]  = "#00AA00",  -- Green
-  [3]  = "#0055DD",  -- Blue
-  [4]  = "#CCAA00",  -- Yellow
-  [5]  = "#DD6600",  -- Orange
-  [6]  = "#9900CC",  -- Purple
-  [7]  = "#00AAAA",  -- Cyan
-  [8]  = "#CC44AA",  -- Pink
+  [1]  = "#0077FF",  -- Vivid Blue
+  [2]  = "#FF6600",  -- Vivid Orange
+  [3]  = "#AA00DD",  -- Vivid Purple
+  [4]  = "#00BBCC",  -- Vivid Cyan
+  [5]  = "#DD0088",  -- Vivid Magenta
+  [6]  = "#0099FF",  -- Sky Blue
+  [7]  = "#FF3399",  -- Hot Pink
+  [8]  = "#8800FF",  -- Electric Violet
   [9]  = "#886600",  -- Brown
   [10] = "#00CC66",  -- Mint
   [11] = "#3366CC",  -- Steel Blue
@@ -588,6 +636,63 @@ local selectedSource = 0
 local amps = {}           -- { [a] = { name = string, comp = component_reference } }
 local outputState = {}    -- { [a] = { [o] = source_number (0-16) } }
 local pollTimer = Timer.New()
+
+-- Source-to-input mapping: sourceInputMap[src] = { sorted list of physical input numbers }
+-- Default: each source maps to its own input number.
+local sourceInputMap = {}
+
+-- Parse a comma-separated string of input numbers into a sorted table.
+local function ParseInputList(str)
+  local inputs = {}
+  if not str or not str:match("%d") then return inputs end
+  for num in str:gmatch("%d+") do
+    local n = tonumber(num)
+    if n and n >= 1 and n <= 16 then
+      inputs[#inputs + 1] = n
+    end
+  end
+  -- Deduplicate and sort
+  table.sort(inputs)
+  local deduped = {}
+  for i, v in ipairs(inputs) do
+    if i == 1 or v ~= inputs[i - 1] then
+      deduped[#deduped + 1] = v
+    end
+  end
+  return deduped
+end
+
+-- Rebuild the input map for a single source from its control
+local function RefreshSourceInputMap(src)
+  local ctrl = Controls["SourceInputs_" .. src]
+  local str = ctrl and ctrl.String or ""
+  if not str:match("%S") then
+    -- Default: source maps to its own input
+    sourceInputMap[src] = { src }
+  else
+    local parsed = ParseInputList(str)
+    sourceInputMap[src] = (#parsed > 0) and parsed or { src }
+  end
+end
+
+-- Rebuild all source input maps
+local function RefreshAllSourceInputMaps()
+  for s = 1, 16 do
+    RefreshSourceInputMap(s)
+  end
+end
+
+-- Get the set of physical inputs for a source as a lookup table { [input]=true }
+local function GetSourceInputSet(src)
+  local set = {}
+  local inputs = sourceInputMap[src]
+  if inputs then
+    for _, inp in ipairs(inputs) do set[inp] = true end
+  else
+    if src >= 1 and src <= 16 then set[src] = true end
+  end
+  return set
+end
 
 ---------------------------------------------------------------
 -- Helpers
@@ -747,33 +852,50 @@ end
 -- Component Interface
 ---------------------------------------------------------------
 
--- Read the current source (1-16) assigned to an output, or 0 if none.
--- Returns -1 on error.
+-- Read the active inputs on an output and match against source input maps.
+-- Returns the matching source (1-16), 0 if no inputs active, or -1 on error.
 local function ReadOutputSource(a, o)
   if not amps[a] or not amps[a].comp then return -1 end
   local comp = amps[a].comp
-  local src = 0
+
+  -- Read which physical inputs are active for this output
+  local activeInputs = {}
   for i = 1, 16 do
     local idx = PatchIndex(o, i)
     local ok, val = pcall(function() return comp["OutputPatch " .. idx].Boolean end)
-    if ok and val then
-      src = i
-      break
-    elseif not ok then
-      return -1
+    if not ok then return -1 end
+    if val then activeInputs[#activeInputs + 1] = i end
+  end
+
+  if #activeInputs == 0 then return 0 end
+
+  -- Sort active inputs and try to match against source input maps
+  table.sort(activeInputs)
+  for src = 1, 16 do
+    local mapped = sourceInputMap[src] or { src }
+    if #mapped == #activeInputs then
+      local match = true
+      for idx, v in ipairs(mapped) do
+        if v ~= activeInputs[idx] then match = false; break end
+      end
+      if match then return src end
     end
   end
-  return src
+
+  -- No exact source match found; return the first active input as a fallback
+  return activeInputs[1] or 0
 end
 
--- Write a source assignment to an output. src=0 clears all 16 inputs.
+-- Write a source assignment to an output using the source's input map.
+-- src=0 clears all 16 inputs.
 local function WriteOutputSource(a, o, src)
   if not amps[a] or not amps[a].comp then return false end
   local comp = amps[a].comp
+  local inputSet = (src > 0) and GetSourceInputSet(src) or {}
   for i = 1, 16 do
     local idx = PatchIndex(o, i)
     local ok, err = pcall(function()
-      comp["OutputPatch " .. idx].Boolean = (i == src)
+      comp["OutputPatch " .. idx].Boolean = (inputSet[i] == true)
     end)
     if not ok then
       dbg("[ERROR] Amp " .. a .. " OutputPatch " .. idx .. ": " .. tostring(err))
@@ -900,6 +1022,17 @@ for s = 1, 16 do
     RefreshAllOutputColors()
   end
 end
+
+-- Source input mapping change handlers
+for s = 1, 16 do
+  Controls["SourceInputs_" .. s].EventHandler = function()
+    RefreshSourceInputMap(s)
+    dbg("[INPUTS] Source " .. s .. " mapped to: " .. table.concat(sourceInputMap[s] or {s}, ","))
+  end
+end
+
+-- Initialize all source input maps (from saved control values or defaults)
+RefreshAllSourceInputMaps()
 
 -- Show/hide output labels mode change
 if Controls.ShowOutputLabels then
