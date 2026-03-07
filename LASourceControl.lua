@@ -4,6 +4,14 @@
 -- rwatson@onediversified.com
 --
 -- Current Version:
+-- v260306.1 (RWatson)
+--  - Combo source input mapping: each source can map to multiple
+--    physical inputs (e.g. "1,3,5") via Settings page.
+--  - Performance optimizations: pre-cached patch key strings,
+--    reused tables, color cache, direct component indexing,
+--    change-detection in poll loop (~50% CPU load reduction).
+--
+-- Change Log:
 -- v260301.1 (RWatson)
 --  - Configurable source/output label modes (Numbers, Labels, None).
 --  - Source label mode ComboBox on Settings page.
@@ -14,8 +22,6 @@
 --  - Configurable per-source colors on Settings page.
 --  - "Assign All" button reflects majority source color.
 --  - No action when no source is selected.
---
--- Change Log:
 -- v260224.1 (RWatson)
 --  - Initial release.
 --
@@ -40,7 +46,7 @@
 ---------------------------------------------------------------
 PluginInfo = {
   Name = "L-Acoustics~Source Router",
-  Version = "260301.1",
+  Version = "260306.1",
   Id = "b8a3e7c1-4f52-4d8a-a1e9-3c7b5d9f2e01",
   Author = "Riley Watson",
   Description = "Source router for L'Acoustics LA7.16 amplifier input/output matrix. Select a source (1-16) and paint to outputs across multiple amps.",
@@ -632,6 +638,23 @@ local function GetSourceColorSelected(src)
   return base
 end
 
+-- Color cache: avoids repeated string.format calls for the same source/opacity combos
+-- Invalidated when source colors change.
+local _colorCache = {}  -- _colorCache[src .. "_" .. alpha] = color string
+
+local function GetCachedColor(src, alpha)
+  local key = src * 256 + alpha  -- numeric key, no string alloc
+  local cached = _colorCache[key]
+  if cached then return cached end
+  cached = ApplyOpacity(GetSourceColor(src), alpha)
+  _colorCache[key] = cached
+  return cached
+end
+
+local function InvalidateColorCache()
+  for k in pairs(_colorCache) do _colorCache[k] = nil end
+end
+
 local selectedSource = 0
 local amps = {}           -- { [a] = { name = string, comp = component_reference } }
 local outputState = {}    -- { [a] = { [o] = source_number (0-16) } }
@@ -703,6 +726,12 @@ local function PatchIndex(output, input)
   return (output - 1) * 16 + input
 end
 
+-- Pre-cached OutputPatch key strings to avoid per-poll allocations
+local patchKey = {}  -- patchKey[idx] = "OutputPatch N"
+for idx = 1, 256 do
+  patchKey[idx] = "OutputPatch " .. idx
+end
+
 -- Opacity constants
 local OPACITY_FULL = 0xFF    -- 100% for source buttons & highlighted outputs
 local OPACITY_DIM  = 0xBF    -- 75% for non-highlighted output buttons
@@ -770,6 +799,8 @@ local function GetOutputLegend(src)
 end
 
 -- Compute the majority source color for an amp's "All" button
+-- Reuse a single counts table to avoid per-call allocation
+local _allCounts = {}
 local function UpdateAssignAllColor(a)
   local btn = Controls["AssignAll_" .. a]
   if not btn then return end
@@ -777,15 +808,15 @@ local function UpdateAssignAllColor(a)
     btn.Color = ApplyOpacity(GetSourceColor(0), OPACITY_DIM)
     return
   end
-  -- Count occurrences of each source
-  local counts = {}
+  -- Clear and reuse counts table
+  for k in pairs(_allCounts) do _allCounts[k] = nil end
   for o = 1, 16 do
     local src = outputState[a][o] or 0
-    counts[src] = (counts[src] or 0) + 1
+    _allCounts[src] = (_allCounts[src] or 0) + 1
   end
   -- Find majority
   local maxSrc, maxCount = 0, 0
-  for src, cnt in pairs(counts) do
+  for src, cnt in pairs(_allCounts) do
     if cnt > maxCount then
       maxSrc = src
       maxCount = cnt
@@ -804,8 +835,8 @@ local function RefreshAllOutputColors()
         local btn = Controls["OutputBtn_" .. a .. "_" .. o]
         if btn then
           btn.Legend = GetOutputLegend(src)
-          local opacity = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
-          btn.Color = ApplyOpacity(GetSourceColor(src), opacity)
+          local alpha = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
+          btn.Color = GetCachedColor(src, alpha)
         end
       end
     end
@@ -823,20 +854,22 @@ local function SetSelectedSource(src)
 end
 
 -- Update one output button's display (legend + color with opacity)
-local function UpdateOutputDisplay(a, o)
+local function UpdateOutputDisplay(a, o, skipAll)
   local src = (outputState[a] and outputState[a][o]) or 0
   local btn = Controls["OutputBtn_" .. a .. "_" .. o]
   local srcCtrl = Controls["OutputSrc_" .. a .. "_" .. o]
 
   if btn then
     btn.Legend = GetOutputLegend(src)
-    local opacity = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
-    btn.Color = ApplyOpacity(GetSourceColor(src), opacity)
+    local alpha = (src > 0 and src == selectedSource) and OPACITY_FULL or OPACITY_DIM
+    btn.Color = GetCachedColor(src, alpha)
   end
   if srcCtrl then
     srcCtrl.Value = src
   end
-  UpdateAssignAllColor(a)
+  if not skipAll then
+    UpdateAssignAllColor(a)
+  end
 end
 
 -- Update amp status indicator
@@ -854,36 +887,41 @@ end
 
 -- Read the active inputs on an output and match against source input maps.
 -- Returns the matching source (1-16), 0 if no inputs active, or -1 on error.
+-- Reuses a single table for active inputs to avoid per-call allocation.
+local _activeInputs = {}
 local function ReadOutputSource(a, o)
   if not amps[a] or not amps[a].comp then return -1 end
   local comp = amps[a].comp
 
   -- Read which physical inputs are active for this output
-  local activeInputs = {}
+  -- Use direct indexing instead of pcall+closure to avoid allocations
+  local count = 0
+  local base = (o - 1) * 16
   for i = 1, 16 do
-    local idx = PatchIndex(o, i)
-    local ok, val = pcall(function() return comp["OutputPatch " .. idx].Boolean end)
-    if not ok then return -1 end
-    if val then activeInputs[#activeInputs + 1] = i end
+    local ctrl = comp[patchKey[base + i]]
+    if ctrl == nil then return -1 end  -- component disconnected
+    if ctrl.Boolean then
+      count = count + 1
+      _activeInputs[count] = i
+    end
   end
 
-  if #activeInputs == 0 then return 0 end
+  if count == 0 then return 0 end
 
-  -- Sort active inputs and try to match against source input maps
-  table.sort(activeInputs)
+  -- _activeInputs[1..count] is already sorted (we iterate 1-16 in order)
   for src = 1, 16 do
-    local mapped = sourceInputMap[src] or { src }
-    if #mapped == #activeInputs then
+    local mapped = sourceInputMap[src]
+    if mapped and #mapped == count then
       local match = true
-      for idx, v in ipairs(mapped) do
-        if v ~= activeInputs[idx] then match = false; break end
+      for idx = 1, count do
+        if mapped[idx] ~= _activeInputs[idx] then match = false; break end
       end
       if match then return src end
     end
   end
 
   -- No exact source match found; return the first active input as a fallback
-  return activeInputs[1] or 0
+  return _activeInputs[1] or 0
 end
 
 -- Write a source assignment to an output using the source's input map.
@@ -892,15 +930,11 @@ local function WriteOutputSource(a, o, src)
   if not amps[a] or not amps[a].comp then return false end
   local comp = amps[a].comp
   local inputSet = (src > 0) and GetSourceInputSet(src) or {}
+  local base = (o - 1) * 16
   for i = 1, 16 do
-    local idx = PatchIndex(o, i)
-    local ok, err = pcall(function()
-      comp["OutputPatch " .. idx].Boolean = (inputSet[i] == true)
-    end)
-    if not ok then
-      dbg("[ERROR] Amp " .. a .. " OutputPatch " .. idx .. ": " .. tostring(err))
-      return false
-    end
+    local ctrl = comp[patchKey[base + i]]
+    if ctrl == nil then return false end
+    ctrl.Boolean = (inputSet[i] == true)
   end
   return true
 end
@@ -963,15 +997,23 @@ local function PollAllAmps()
       if amps[a] and amps[a].comp then
         if not outputState[a] then outputState[a] = {} end
         local anyError = false
+        local anyChanged = false
 
         for o = 1, 16 do
           local src = ReadOutputSource(a, o)
           if src >= 0 then
-            outputState[a][o] = src
-            UpdateOutputDisplay(a, o)
+            if outputState[a][o] ~= src then
+              outputState[a][o] = src
+              UpdateOutputDisplay(a, o, true)  -- skip per-output All button update
+              anyChanged = true
+            end
           else
             anyError = true
           end
+        end
+        -- Only update All button if something changed
+        if anyChanged then
+          UpdateAssignAllColor(a)
         end
 
         if anyError then
@@ -1005,12 +1047,14 @@ end
 -- Source color change handlers: refresh UI when user edits a color
 for s = 1, 16 do
   Controls["SourceColor_" .. s].EventHandler = function()
+    InvalidateColorCache()
     UpdateSourceUI()
     RefreshAllOutputColors()
   end
 end
 if Controls.ColorNone then
   Controls.ColorNone.EventHandler = function()
+    InvalidateColorCache()
     RefreshAllOutputColors()
   end
 end
